@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"example.com/qqauth/internal/approval"
+	"example.com/qqauth/internal/botipc"
+	"example.com/qqauth/internal/model"
 )
 
 func main() {
@@ -30,7 +32,8 @@ func main() {
 
 	// 创建管理器
 	manager := approval.NewManager(time.Minute, 100)
-
+	// 创建与QQ机器人框架的通信管理器
+	server := botipc.NewServer("/tmp/botipc-dev.sock", manager)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -38,32 +41,18 @@ func main() {
 		}
 
 		log.Printf("New connection from %s", conn.RemoteAddr())
-		go handleConnection(conn, manager)
+		go handleConnection(conn, manager, server)
 		// conn.Close()
 	}
 }
 
-type Req struct {
-	Version    uint   `json:"version"`
-	Type       string `json:"type"`
-	Service    string `json:"service"`
-	User       string `json:"user"`
-	RemoteHost string `json:"remote_host"`
-}
-
-type Resp struct {
-	Version  uint   `json:"version"`
-	Type     string `json:"type"`
-	Approved bool   `json:"approved"`
-}
-
-func handleConnection(conn net.Conn, manager *approval.Manager) {
+func handleConnection(conn net.Conn, manager *approval.Manager, server *botipc.Server) {
 	defer conn.Close()
 	// 设置超时
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	// 创建JSON解码器, 确保自动获取完整的JSON后再进行解析
 	decoder := json.NewDecoder(conn)
-	var req Req
+	var req model.Req
 	if err := decoder.Decode(&req); err != nil {
 		log.Printf("Handle connection failed: %v", err)
 		return
@@ -83,7 +72,7 @@ func handleConnection(conn net.Conn, manager *approval.Manager) {
 			log.Printf("Set write deadline failed: %v", err)
 			return
 		}
-		s := Resp{
+		s := model.Resp{
 			Version: 1,
 			Type:    "pong",
 		}
@@ -99,6 +88,8 @@ func handleConnection(conn net.Conn, manager *approval.Manager) {
 			log.Printf("Failed when create new login request: %v", err)
 			return
 		}
+		// 发起申请
+		server.Send(r)
 		// 等待结果
 		ctx, cancel := context.WithCancel(context.Background())
 		// 建立监测, 处理客户端主动断开连接的情况
@@ -142,7 +133,7 @@ func handleConnection(conn net.Conn, manager *approval.Manager) {
 		}
 		// 通知监控线程静默退出
 		<-stopWatch
-		var s Resp
+		var s model.Resp
 		s.Type = "auth_result"
 		s.Version = 1
 		if decision == approval.Approved {
