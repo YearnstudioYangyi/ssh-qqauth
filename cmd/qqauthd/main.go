@@ -34,6 +34,8 @@ func main() {
 	manager := approval.NewManager(time.Minute, 100)
 	// 创建与QQ机器人框架的通信管理器
 	server := botipc.NewServer("/tmp/botipc-dev.sock", manager)
+	server.Listen()
+	go server.Serve()
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -120,6 +122,7 @@ func handleConnection(conn net.Conn, manager *approval.Manager, server *botipc.S
 
 		decision := manager.Wait(ctx, r, ch)
 		// 让阻塞的Read结束
+		close(stopWatch)
 		if err := conn.SetReadDeadline(time.Now()); err != nil {
 			log.Printf("Stop Read() failed: %v", err)
 			return

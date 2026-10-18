@@ -46,8 +46,10 @@ func (s *Server) Serve() {
 		conn, err := s.listener.Accept()
 		if err != nil {
 			log.Printf("Accept new connection from Bot IPC failed: %v", err)
+			continue
 		}
 		con := newConnection(conn)
+		s.connection = con
 		if err := con.Serve(s.handleResponse); err != nil {
 			log.Printf("Bot IPC connection exit: %v", err)
 		}
