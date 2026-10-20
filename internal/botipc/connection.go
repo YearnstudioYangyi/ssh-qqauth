@@ -14,7 +14,7 @@ type handleResponseFunc func(model.BotIPCResponse) error
 
 type connection struct {
 	conn   net.Conn
-	sendCh chan model.BotIPCRequest
+	sendCh chan any
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -24,21 +24,20 @@ func newConnection(conn net.Conn) *connection {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &connection{
 		conn:   conn,
-		sendCh: make(chan model.BotIPCRequest),
+		sendCh: make(chan any, 32),
 		cancel: cancel,
 		ctx:    ctx,
 	}
 }
 
-// 发送批准请求
-func (conn *connection) Send(req model.BotIPCRequest) error {
+// 发送消息
+func (conn *connection) Send(msg any) error {
 	select {
-	case conn.sendCh <- req:
+	case conn.sendCh <- msg:
 		return nil
 	case <-conn.ctx.Done():
 		return fmt.Errorf("Try to send data on closed Bot IPC Connection")
 	}
-	// conn.sendCh <- req
 }
 
 // 启动读写goroutine

@@ -4,22 +4,27 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 
 	"example.com/qqauth/internal/approval"
 	"example.com/qqauth/internal/model"
+	"example.com/qqauth/internal/security"
 )
 
 type Server struct {
 	socketPath string
 	listener   *net.UnixListener
 	manager    *approval.Manager
-	*connection
+	guard      *security.Guard
+	connMu     sync.RWMutex
+	connection *connection
 }
 
-func NewServer(socketPath string, manager *approval.Manager) *Server {
+func NewServer(socketPath string, manager *approval.Manager, guard *security.Guard) *Server {
 	return &Server{
 		socketPath: socketPath,
 		manager:    manager,
+		guard:      guard,
 	}
 }
 
@@ -49,16 +54,37 @@ func (s *Server) Serve() {
 			continue
 		}
 		con := newConnection(conn)
+		s.connMu.Lock()
 		s.connection = con
+		s.connMu.Unlock()
+
 		if err := con.Serve(s.handleResponse); err != nil {
 			log.Printf("Bot IPC connection exit: %v", err)
 		}
+
+		s.connMu.Lock()
+		if s.connection == con {
+			s.connection = nil
+		}
+		s.connMu.Unlock()
 	}
 }
 
-// 发送一个请求
+// SendMsg 发送任意出站消息给 Bot
+func (s *Server) SendMsg(msg any) error {
+	s.connMu.RLock()
+	con := s.connection
+	s.connMu.RUnlock()
+
+	if con == nil {
+		return fmt.Errorf("no active Bot IPC connection")
+	}
+	return con.Send(msg)
+}
+
+// Send 发送一个审批请求
 func (s *Server) Send(req approval.Request) error {
-	return s.connection.Send(model.BotIPCRequest{
+	return s.SendMsg(model.BotIPCRequest{
 		ID:         req.ID,
 		Version:    "1",
 		Service:    req.Service,
@@ -67,15 +93,76 @@ func (s *Server) Send(req approval.Request) error {
 	})
 }
 
-func (s *Server) handleResponse(resp model.BotIPCResponse) error {
-	if resp.Type != "approve" {
-		return fmt.Errorf("Unknown response type")
+// SendAlert 发送安全告警
+func (s *Server) SendAlert(alert model.BotAlertMessage) error {
+	if alert.Version == "" {
+		alert.Version = "1"
 	}
-	// 判断批准还是拒绝
-	if resp.Approval {
-		return s.manager.Decide(resp.ID, approval.Approved)
-	} else {
-		return s.manager.Decide(resp.ID, approval.Denied)
+	if alert.Type == "" {
+		alert.Type = "alert"
+	}
+	return s.SendMsg(alert)
+}
+
+func (s *Server) handleResponse(resp model.BotIPCResponse) error {
+	switch resp.Type {
+	case "approve":
+		if resp.ID == "" {
+			return fmt.Errorf("approve command missing id")
+		}
+		if resp.Approval {
+			return s.manager.Decide(resp.ID, approval.Approved)
+		} else {
+			return s.manager.Decide(resp.ID, approval.Denied)
+		}
+
+	case "ban_list":
+		if s.guard == nil {
+			return fmt.Errorf("guard is nil")
+		}
+		items := s.guard.ListBanned()
+		return s.SendMsg(model.BotBanListResponse{
+			Version: "1",
+			Type:    "ban_list_resp",
+			Items:   items,
+		})
+
+	case "unban":
+		if s.guard == nil {
+			return fmt.Errorf("guard is nil")
+		}
+		success := s.guard.Unban(resp.IP)
+		msg := fmt.Sprintf("IP %s unbanned successfully", resp.IP)
+		if !success {
+			msg = fmt.Sprintf("IP %s was not in ban list", resp.IP)
+		}
+		return s.SendMsg(model.BotActionResponse{
+			Version: "1",
+			Type:    "action_resp",
+			Action:  "unban",
+			Success: success,
+			Message: msg,
+		})
+
+	case "ban":
+		if s.guard == nil {
+			return fmt.Errorf("guard is nil")
+		}
+		reason := resp.Reason
+		if reason == "" {
+			reason = "Manually banned via Bot command"
+		}
+		rec := s.guard.Ban(resp.IP, reason, 0)
+		return s.SendMsg(model.BotActionResponse{
+			Version: "1",
+			Type:    "action_resp",
+			Action:  "ban",
+			Success: rec != nil,
+			Message: fmt.Sprintf("IP %s banned until %s", resp.IP, rec.ExpiresAt.Format("2006-01-02 15:04:05")),
+		})
+
+	default:
+		return fmt.Errorf("Unknown response type: %s", resp.Type)
 	}
 }
 
